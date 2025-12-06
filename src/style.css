@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-scribble: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", Arial, sans-serif;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-scribble);
+  background-color: #fdfbf7; /* Paper color */
+  color: #2c3e50; /* Ink color */
+  overflow: hidden; /* App-like feel */
+}
+
+/* Custom Scrollbar for that "sketchy" feel */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent; 
+}
+::-webkit-scrollbar-thumb {
+  background: #d5d8dc; 
+  border-radius: 10px;
+  border: 2px solid #fdfbf7;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #aab7b8; 
+}
+
+/* Utility class for handwritten borders */
+.border-scribble {
+  border: 2px solid #2c3e50;
+  border-radius: 255px 15px 225px 15px / 15px 225px 15px 255px;
+}
+
+.border-scribble-sm {
+  border: 2px solid #2c3e50;
+  border-radius: 25px 5px 22px 5px / 5px 22px 5px 25px;
+}

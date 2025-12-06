@@ -1,0 +1,450 @@
+import { net } from 'electron'
+import { getSetting } from './db'
+
+// Simple LLM Interface
+// In a real app, we might use 'openai' npm package, but 'net' is built-in Electron and works for simple REST calls.
+// This avoids adding more dependencies for now.
+
+interface ChatMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+interface ProviderConfig {
+  apiKey: string
+  baseUrl: string
+  temperature: number
+  maxTokens: number
+  topP: number
+}
+
+interface ActiveModel {
+  provider: string
+  modelId: string
+}
+
+function getProviderConfig(providerId: string): ProviderConfig | null {
+  const providersJson = getSetting('providers')
+  console.log('Raw providers JSON from DB:', providersJson)
+  if (!providersJson) return null
+  
+  try {
+    const providers = JSON.parse(providersJson)
+    console.log('Parsed providers:', JSON.stringify(providers, null, 2))
+    console.log(`Provider config for '${providerId}':`, providers[providerId])
+    return providers[providerId] || null
+  } catch (e) {
+    console.error('Failed to parse providers JSON:', e)
+    return null
+  }
+}
+
+function getActiveModel(): ActiveModel {
+  const activeModelJson = getSetting('activeModel')
+  if (activeModelJson) {
+    try {
+      return JSON.parse(activeModelJson)
+    } catch {
+      // fall through to default
+    }
+  }
+  return { provider: 'ollama', modelId: 'llama3' }
+}
+
+// Default base URLs for providers
+const DEFAULT_BASE_URLS: Record<string, string> = {
+  ollama: 'http://localhost:11434',
+  openai: 'https://api.openai.com/v1',
+  deepseek: 'https://api.deepseek.com/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  cerebras: 'https://api.cerebras.ai/v1',
+  dashscope: 'https://api-inference.modelscope.cn/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
+}
+
+export async function callLLM(messages: ChatMessage[], onProgress?: (chunk: string) => void): Promise<string> {
+  // Load active model and provider config
+  const activeModel = getActiveModel()
+  const providerConfig = getProviderConfig(activeModel.provider)
+  
+  const provider = activeModel.provider
+  const model = activeModel.modelId
+  const baseUrl = providerConfig?.baseUrl || DEFAULT_BASE_URLS[provider] || 'http://localhost:11434'
+  const apiKey = providerConfig?.apiKey || ''
+  const temperature = providerConfig?.temperature ?? 0.7
+  const maxTokens = providerConfig?.maxTokens ?? 4096
+  const topP = providerConfig?.topP ?? 0.9
+
+  // Build API endpoint
+  let apiEndpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`
+  
+  // Ollama uses /v1/chat/completions, most others use /chat/completions
+  if (provider === 'ollama') {
+    apiEndpoint = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`
+  }
+
+  console.log(`Calling LLM (${provider}/${model}) at ${apiEndpoint} with ${messages.length} messages...`)
+  console.log(`Settings: temperature=${temperature}, maxTokens=${maxTokens}, topP=${topP}`)
+
+  // Validate API key when provider requires it (local Ollama usually doesn't need a remote key)
+  const providersRequiringKey = ['openai', 'deepseek', 'anthropic', 'cerebras', 'dashscope', 'openrouter']
+  if (providersRequiringKey.includes(provider) && !apiKey) {
+    throw new Error(`No API key configured for provider '${provider}'. Please configure an API key in Settings.`)
+  }
+
+  // Handle Anthropic separately (different API format)
+  if (provider === 'anthropic') {
+    return callAnthropicLLM(messages, model, apiKey, baseUrl, temperature, maxTokens, topP)
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = net.request({
+      method: 'POST',
+      url: apiEndpoint,
+    })
+
+    request.setHeader('Content-Type', 'application/json')
+    if (apiKey) request.setHeader('Authorization', `Bearer ${apiKey}`)
+
+    // ModelScope (dashscope) accepts tokens via a dedicated header in some deployments.
+    // Send both forms to maximize compatibility: Authorization + x-modelscope-token
+    if (provider === 'dashscope' && apiKey) {
+      request.setHeader('x-modelscope-token', apiKey)
+    }
+
+    const body = JSON.stringify({
+      model: model,
+      messages: messages,
+      temperature: temperature,
+      max_tokens: maxTokens,
+      top_p: topP,
+      stream: true
+    })
+
+    request.write(body)
+
+    request.on('response', (response) => {
+      // Check if the response is an SSE/text stream
+      const contentType = response.headers['content-type'] || ''
+      const isEventStream = typeof contentType === 'string' && contentType.includes('text/event-stream')
+
+      if (isEventStream && onProgress) {
+        // SSE-style streaming (OpenAI-like) -- parse data: ... events
+        let buffer = ''
+        let accumulated = ''
+
+        response.on('data', (chunk) => {
+          const s = chunk.toString()
+          buffer += s
+
+          // Process any complete event blocks separated by \n\n
+          let idx
+          while ((idx = buffer.indexOf('\n\n')) !== -1) {
+            const part = buffer.slice(0, idx).trim()
+            buffer = buffer.slice(idx + 2)
+
+            if (!part) continue
+            // Expect lines starting with 'data:'
+            const lines = part.split('\n')
+            for (const line of lines) {
+              const trimmed = line.trim()
+              if (!trimmed.startsWith('data:')) continue
+              const payload = trimmed.replace(/^data:\s*/, '')
+              if (payload === '[DONE]') {
+                // finished
+                // nothing to do here — finalization handled on 'end'
+                continue
+              }
+
+              try {
+                const json = JSON.parse(payload)
+                // OpenAI-like object: choices[0].delta.content
+                const delta = json.choices?.[0]?.delta
+                const content = delta?.content || json.choices?.[0]?.text || ''
+                if (content) {
+                  accumulated += content
+                  // forward small chunk to the caller
+                  onProgress(content)
+                }
+              } catch (e) {
+                // fallback: send raw payload
+                onProgress(payload)
+              }
+            }
+          }
+        })
+
+        response.on('end', () => {
+          if (response.statusCode !== 200) {
+            reject(new Error(`LLM stream ended with status ${response.statusCode}`))
+            return
+          }
+          resolve(accumulated)
+        })
+
+        response.on('error', (err: any) => {
+          reject(err)
+        })
+
+        return
+      }
+
+      // Non-streaming / JSON response -- but some providers send SSE-like text even
+      // when Content-Type isn't set to text/event-stream. Detect SSE payloads and
+      // parse them as a fallback so we don't try to JSON.parse raw "data: {...}" text.
+      let data = ''
+      
+      response.on('data', (chunk) => {
+        data += chunk.toString()
+      })
+      
+      response.on('end', () => {
+        if (response.statusCode !== 200) {
+          console.error('LLM Error:', data)
+
+          // Try to parse structured error info
+          let details = data
+          try {
+            const json = JSON.parse(data)
+            if (json.error || json.errors || json.message) {
+              details = JSON.stringify(json.error || json.errors || json.message)
+            }
+          } catch (e) {
+            // keep raw data
+          }
+
+          if (response.statusCode === 401) {
+            reject(new Error(`Authentication failed for provider '${provider}': ${details}`))
+            return
+          }
+
+          reject(new Error(`LLM API Error (${response.statusCode}): ${details}`))
+          return
+        }
+        
+        try {
+          // If the body looks like SSE (starts with "data:" or contains blocks),
+          // parse it into an accumulated text output instead of direct JSON.parse.
+          const looksLikeSSE = data.trim().startsWith('data:') || data.includes('\n\ndata:') || data.includes('\ndata:')
+
+          let content = ''
+
+          if (looksLikeSSE) {
+            // Parse SSE-style payloads (blocks separated by double newlines)
+            const blocks = data.split(/\n\n+/)
+            for (const block of blocks) {
+              const lines = block.split(/\n+/)
+              for (const line of lines) {
+                const trimmed = line.trim()
+                if (!trimmed) continue
+                if (!trimmed.startsWith('data:')) continue
+                const payload = trimmed.replace(/^data:\s*/, '')
+                if (payload === '[DONE]') continue
+                try {
+                  const json = JSON.parse(payload)
+                  const delta = json.choices?.[0]?.delta
+                  const piece = delta?.content || json.choices?.[0]?.text || ''
+                  if (piece) content += piece
+                } catch (e) {
+                  // not JSON — append raw payload
+                  content += payload
+                }
+              }
+            }
+          } else {
+            const json = JSON.parse(data)
+            content = json.choices?.[0]?.message?.content || json.choices?.[0]?.text || ''
+          }
+          // If an onProgress callback exists but no event-stream available, we can optionally flush the final content in chunks
+          if (onProgress && content) {
+            // Very small chunk size to give a streaming feel while still waiting for full response
+            const CHUNK = 120
+            for (let i = 0; i < content.length; i += CHUNK) {
+              const c = content.slice(i, i + CHUNK)
+              onProgress(c)
+            }
+          }
+
+          // If an onProgress callback exists, send the final content in chunks
+          if (onProgress && content) {
+            const CHUNK = 120
+            for (let i = 0; i < content.length; i += CHUNK) {
+              const c = content.slice(i, i + CHUNK)
+              onProgress(c)
+            }
+          }
+
+          resolve(content)
+        } catch (e) {
+          reject(e)
+        }
+      })
+    })
+
+    request.on('error', (error) => {
+      reject(error)
+    })
+
+    request.end()
+  })
+}
+
+// Anthropic has a different API format
+async function callAnthropicLLM(
+  messages: ChatMessage[], 
+  model: string, 
+  apiKey: string,
+  baseUrl: string,
+  temperature: number,
+  maxTokens: number,
+  topP: number
+): Promise<string> {
+  const apiEndpoint = `${baseUrl.replace(/\/$/, '')}/messages`
+  
+  // Convert messages format for Anthropic
+  // Anthropic uses a different structure: system is separate, messages array only has user/assistant
+  const systemMessage = messages.find(m => m.role === 'system')?.content || ''
+  const anthropicMessages = messages
+    .filter(m => m.role !== 'system')
+    .map(m => ({
+      role: m.role,
+      content: m.content
+    }))
+
+  return new Promise((resolve, reject) => {
+    const request = net.request({
+      method: 'POST',
+      url: apiEndpoint,
+    })
+
+    request.setHeader('Content-Type', 'application/json')
+    request.setHeader('x-api-key', apiKey)
+    request.setHeader('anthropic-version', '2023-06-01')
+
+    const body = JSON.stringify({
+      model: model,
+      max_tokens: maxTokens,
+      temperature: temperature,
+      top_p: topP,
+      system: systemMessage,
+      messages: anthropicMessages
+    })
+
+    request.write(body)
+
+    request.on('response', (response) => {
+      let data = ''
+      
+      response.on('data', (chunk) => {
+        data += chunk.toString()
+      })
+      
+      response.on('end', () => {
+        if (response.statusCode !== 200) {
+          console.error('Anthropic Error:', data)
+          reject(new Error(`Anthropic API Error (${response.statusCode}): ${data}`))
+          return
+        }
+        
+        try {
+          const json = JSON.parse(data)
+          const content = json.content?.[0]?.text || ''
+          resolve(content)
+        } catch (e) {
+          reject(e)
+        }
+      })
+    })
+
+    request.on('error', (error) => {
+      reject(error)
+    })
+
+    request.end()
+  })
+}
+
+export async function generateSummary(history: ChatMessage[]): Promise<string> {
+  // We only need the last few messages to update the summary, or the whole history?
+  // Ideally, we ask the AI to "Update the summary based on new information".
+  // For simplicity, we send the whole history and ask for a concise summary.
+  
+  const summaryPrompt = `
+    Analyze the following conversation and provide a concise summary (max 3 sentences) of the key concepts, decisions, or facts established. 
+    This summary will be used as context for future conversations.
+    Focus on the "Knowledge" generated in this node.
+  `
+  
+  const messages: ChatMessage[] = [
+    { role: 'system', content: summaryPrompt },
+    ...history.slice(-10) // Limit to last 10 messages to save tokens
+  ]
+  
+  const raw = await callLLM(messages)
+
+  // Remove any <think>...</think> blocks (and variants) from the model output.
+  // Some models include internal deliberation tags like <think>...<\/think> — we want
+  // the visible summary to exclude those sections.
+  // Use a forgiving regex that strips any opening <think...> to matching </think>.
+  try {
+    const cleaned = raw.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '')
+      .replace(/\s+/g, ' ') // squash excessive whitespace
+      .trim()
+
+    return cleaned
+  } catch (e) {
+    // Fallback: if something goes wrong with the regex, return raw summary
+    return raw
+  }
+}
+
+/**
+ * Generates a tree structure for a new workspace based on user description.
+ * Returns an array of cards with parent-child relationships.
+ */
+export interface GeneratedTreeNode {
+  title: string
+  summary: string
+  children?: GeneratedTreeNode[]
+}
+
+export async function generateWorkspaceTree(description: string): Promise<GeneratedTreeNode[]> {
+  const systemPrompt = `You are a knowledge architect. Based on the user's description of a topic or project, generate a hierarchical tree structure of knowledge cards. Each card should have a title and a brief summary.
+
+Output a JSON array of nodes. Each node has:
+- "title": string (short, descriptive title)
+- "summary": string (1-2 sentence description of what this node covers)
+- "children": optional array of child nodes (same structure)
+
+Generate 3-7 top-level nodes, each with 0-3 children as appropriate. Keep it balanced and useful.
+
+IMPORTANT: Output ONLY valid JSON, no markdown code blocks, no explanations. Just the raw JSON array.`
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Create a knowledge tree structure for: ${description}` }
+  ]
+
+  const raw = await callLLM(messages)
+
+  // Clean and parse response
+  try {
+    // Remove any markdown code blocks if present
+    let cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim()
+    // Remove think tags
+    cleaned = cleaned.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '').trim()
+    
+    // Try to find JSON array in the response
+    const startIdx = cleaned.indexOf('[')
+    const endIdx = cleaned.lastIndexOf(']')
+    if (startIdx !== -1 && endIdx !== -1) {
+      cleaned = cleaned.slice(startIdx, endIdx + 1)
+    }
+    
+    const tree = JSON.parse(cleaned)
+    return tree as GeneratedTreeNode[]
+  } catch (e) {
+    console.error('Failed to parse tree generation response:', e, raw)
+    throw new Error('AI返回的格式无法解析，请重试')
+  }
+}
