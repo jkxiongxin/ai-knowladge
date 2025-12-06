@@ -624,7 +624,7 @@ export const useCanvasStore = defineStore('canvas', () => {
   
   function onNodesChange(changes: NodeChange[]) {
     // Apply changes to local state
-    nodes.value = applyNodeChanges(changes, nodes.value)
+    nodes.value = applyNodeChanges(changes, nodes.value as any) as any
     
     // Handle specific changes like 'position' dragging end
     // Note: applyNodeChanges handles the immediate visual update.
@@ -633,7 +633,7 @@ export const useCanvasStore = defineStore('canvas', () => {
   }
 
   function onEdgesChange(changes: EdgeChange[]) {
-    edges.value = applyEdgeChanges(changes, edges.value)
+    edges.value = applyEdgeChanges(changes, edges.value as any) as any
   }
 
   // Canvas-level undo/redo: apply the inverse of the most recent canvas action

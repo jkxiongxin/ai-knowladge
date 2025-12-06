@@ -42,6 +42,10 @@
     "directories": {
       "output": "release"
     },
+    "asarUnpack": [
+      "dist/**",
+      "**/*.node"
+    ],
     "mac": {
       "category": "public.app-category.productivity"
     }

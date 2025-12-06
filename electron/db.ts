@@ -17,14 +17,50 @@ export function initDB() {
     db.pragma('foreign_keys = ON')
     
     // Load Schema
-    // In dev: process.cwd() is project root.
-    // In prod: resources path. For now, we rely on dev environment or manual copy.
-    const schemaPath = path.resolve(process.cwd(), 'database/schema.sql')
-    if (fs.existsSync(schemaPath)) {
-        const schema = fs.readFileSync(schemaPath, 'utf-8')
+    // Priority:
+    // 1) database/schema.sql relative to process.cwd() (dev)
+    // 2) database/schema.sql relative to __dirname (built electron app)
+    // 3) resourcesPath/app.asar.unpacked/database/schema.sql (packaged and unpacked)
+    // 4) fallback to embedded schema (ensures packaged app can initialize DB even if schema file missing)
+    let schema: string | null = null
+    const candidatePaths = [
+      path.resolve(process.cwd(), 'database/schema.sql'),
+      path.resolve(__dirname, '../database/schema.sql'),
+      path.join(process.resourcesPath || '', 'app.asar.unpacked', 'database', 'schema.sql'),
+      path.join(process.resourcesPath || '', 'app.asar', 'database', 'schema.sql'),
+      path.join(app.getAppPath ? app.getAppPath() : '', 'database', 'schema.sql')
+    ]
+
+    for (const p of candidatePaths) {
+      try {
+        if (p && fs.existsSync(p)) {
+          schema = fs.readFileSync(p, 'utf8')
+          console.log('Loaded DB schema from', p)
+          break
+        }
+      } catch (err) {
+        // continue to next candidate
+      }
+    }
+
+    // If still not found, use embedded schema string as a final fallback.
+    if (!schema) {
+      console.warn('Database schema file not found in candidate paths, using embedded schema fallback.')
+      schema = `-- Embedded schema fallback\n\n-- Workspaces\nCREATE TABLE IF NOT EXISTS workspaces (\n  id TEXT PRIMARY KEY,\n  name TEXT NOT NULL,\n  description TEXT,\n  created_at INTEGER DEFAULT (unixepoch()),\n  updated_at INTEGER DEFAULT (unixepoch())\n);\n\n-- Cards\nCREATE TABLE IF NOT EXISTS cards (\n  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, title TEXT DEFAULT 'Untitled', summary TEXT DEFAULT '', status TEXT CHECK(status IN ('todo','in_progress','done','archived')) DEFAULT 'todo', x REAL NOT NULL DEFAULT 0, y REAL NOT NULL DEFAULT 0, width REAL DEFAULT 300, height REAL DEFAULT 200, active_leaf_message_id TEXT, created_at INTEGER DEFAULT (unixepoch()), updated_at INTEGER DEFAULT (unixepoch()), FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE, FOREIGN KEY (active_leaf_message_id) REFERENCES messages(id) ON DELETE SET NULL\n);\n\n-- Connections\nCREATE TABLE IF NOT EXISTS connections (\n  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, source_card_id TEXT NOT NULL, target_card_id TEXT NOT NULL, type TEXT DEFAULT 'context_flow', path_data TEXT, created_at INTEGER DEFAULT (unixepoch()), FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE, FOREIGN KEY (source_card_id) REFERENCES cards(id) ON DELETE CASCADE, FOREIGN KEY (target_card_id) REFERENCES cards(id) ON DELETE CASCADE, UNIQUE(source_card_id, target_card_id)\n);\n\n-- Messages\nCREATE TABLE IF NOT EXISTS messages (\n  id TEXT PRIMARY KEY, card_id TEXT NOT NULL, parent_id TEXT, role TEXT CHECK(role IN ('user','assistant','system')) NOT NULL, content TEXT NOT NULL, model_provider TEXT, model_name TEXT, token_usage INTEGER, created_at INTEGER DEFAULT (unixepoch()), FOREIGN KEY (card_id) REFERENCES cards(id) ON DELETE CASCADE, FOREIGN KEY (parent_id) REFERENCES messages(id) ON DELETE CASCADE\n);\n\n-- Summaries\nCREATE TABLE IF NOT EXISTS summaries (\n  id TEXT PRIMARY KEY, card_id TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER DEFAULT (unixepoch()), source TEXT CHECK(source IN ('ai_auto','user_edit')) DEFAULT 'ai_auto', FOREIGN KEY (card_id) REFERENCES cards(id) ON DELETE CASCADE\n);\n\n-- Settings\nCREATE TABLE IF NOT EXISTS settings (\n  key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER DEFAULT (unixepoch())\n);\n\n-- FTS & triggers (best-effort; older SQLite builds may not have fts5, so wrap in try/catch at runtime)\nBEGIN;\nCREATE VIRTUAL TABLE IF NOT EXISTS cards_fts USING fts5(title, summary, content='cards', content_rowid='rowid');\nCREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='rowid');\nCREATE TRIGGER IF NOT EXISTS cards_ai AFTER INSERT ON cards BEGIN\n  INSERT INTO cards_fts(rowid, title, summary) VALUES (new.rowid, new.title, new.summary);\nEND;\nCREATE TRIGGER IF NOT EXISTS cards_ad AFTER DELETE ON cards BEGIN\n  INSERT INTO cards_fts(cards_fts, rowid, title, summary) VALUES('delete', old.rowid, old.title, old.summary);\nEND;\nCREATE TRIGGER IF NOT EXISTS cards_au AFTER UPDATE ON cards BEGIN\n  INSERT INTO cards_fts(cards_fts, rowid, title, summary) VALUES('delete', old.rowid, old.title, old.summary);\n  INSERT INTO cards_fts(rowid, title, summary) VALUES (new.rowid, new.title, new.summary);\nEND;\nCREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN\n  INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);\nEND;\nCREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN\n  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);\nEND;\nCREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN\n  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);\n  INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);\nEND;\nCOMMIT;`;
+    }
+
+    try {
+      // Only apply the schema if the DB is fresh / missing the core 'workspaces' table
+      const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workspaces'").get()
+      if (!row) {
         db.exec(schema)
-    } else {
-        console.warn('Schema file not found at', schemaPath, 'Skipping schema init (assuming DB exists or handled otherwise)')
+        console.log('Database schema applied successfully')
+      } else {
+        // Schema exists, try to still ensure FTS triggers exist — best-effort
+        // No-op here; we assume versioning/migrations handled elsewhere
+      }
+    } catch (err) {
+      console.error('Failed to apply DB schema:', err)
     }
     
     console.log('Database initialized successfully')
@@ -270,7 +306,7 @@ export function exportWorkspace(workspaceId: string) {
   const workspace = getWorkspace(workspaceId)
   if (!workspace) throw new Error('Workspace not found')
 
-  const cards = database.prepare('SELECT * FROM cards WHERE workspace_id = ?').all(workspaceId)
+  const cards = database.prepare('SELECT * FROM cards WHERE workspace_id = ?').all(workspaceId) as Card[]
   const connections = database.prepare('SELECT * FROM connections WHERE workspace_id = ?').all(workspaceId)
 
   // Gather messages and summaries for every card

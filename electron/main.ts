@@ -62,7 +62,7 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1200,
     height: 800,
-    icon: path.join(process.env.VITE_PUBLIC, 'electron-vite.svg'),
+    icon: path.join(process.env.VITE_PUBLIC || '', 'electron-vite.svg'),
     webPreferences: {
       preload: preloadPath,
       nodeIntegration: false,
@@ -79,10 +79,41 @@ function createWindow() {
   })
 
   if (VITE_DEV_SERVER_URL) {
+    // Dev server (during development)
     win.loadURL(VITE_DEV_SERVER_URL)
   } else {
-    // win.loadFile('dist/index.html')
-    win.loadFile(path.join(process.env.DIST, 'index.html'))
+    // Packaged app — try to load an unpacked copy of the built renderer
+    // Files inside `app.asar` are not accessible via `file://` in the renderer, so
+    // we prefer the unpacked location (app.asar.unpacked) when available.
+    const packagedIndex = path.join(process.env.DIST || '', 'index.html')
+
+    // app.isPackaged apps usually place unpacked files under `resources/app.asar.unpacked`
+    const unpackedIndex = path.join(app.getAppPath().replace(/app\.asar(\/|$)/, ''), 'app.asar.unpacked', 'dist', 'index.html')
+
+    // Try unpacked first (works when build uses asarUnpack for dist)
+    if (fs.existsSync(unpackedIndex)) {
+      win.loadFile(unpackedIndex)
+    } else if (fs.existsSync(packagedIndex)) {
+      // fallback: try the path derived from process.env.DIST (may point inside app.asar)
+      try {
+        win.loadFile(packagedIndex)
+      } catch (e) {
+        console.error('Failed to load packaged index via loadFile:', packagedIndex, e)
+        // show readable error in renderer via fallback URL with file:// so it's explicit
+        const url = `file://${packagedIndex}`
+        win.loadURL(url)
+      }
+    } else {
+      // Final fallback: attempt to load from resources directory
+      const resourcesIndex = path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'index.html')
+      if (fs.existsSync(resourcesIndex)) {
+        win.loadFile(resourcesIndex)
+      } else {
+        console.error('Cannot find index.html to load. Paths tried:', { unpackedIndex, packagedIndex, resourcesIndex })
+        // Open devtools so users can inspect, and load a minimal content explaining error
+        win.loadURL('data:text/html,Error: cannot find index.html in packaged app. Check packaging settings (asarUnpack).')
+      }
+    }
   }
 }
 
@@ -571,6 +602,27 @@ app.whenReady().then(() => {
         content: `Error contacting model provider: ${shortMessage}. Check provider settings / API key in Settings.`,
         created_at: Date.now()
       }
+    }
+  })
+
+  // Receive renderer-side fatal errors so we can persist logs for installed apps
+  ipcMain.on('renderer-error', (_, payload: any) => {
+    try {
+      console.error('[renderer-error]', payload)
+      const logDir = app.getPath('userData')
+      const out = path.join(logDir, 'renderer-errors.log')
+      const line = `[${new Date().toISOString()}] ${JSON.stringify(payload)}\n`
+      fs.appendFileSync(out, line)
+    } catch (e) {
+      console.error('Failed writing renderer error log', e)
+    }
+  })
+
+  ipcMain.on('open-devtools', () => {
+    try {
+      win?.webContents.openDevTools({ mode: 'detach' })
+    } catch (e) {
+      console.error('Failed to open devtools', e)
     }
   })
 

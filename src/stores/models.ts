@@ -192,7 +192,7 @@ export const useModelStore = defineStore('models', () => {
           const ollamaModels = await electronApi.getOllamaModels(config?.baseUrl)
           models = ollamaModels.map((model: any) => ({
             id: model.name,
-            name: model.name.replace(/:/g, ' ').replace(/_/g, ' ').split(' ').map(word => 
+            name: model.name.replace(/:/g, ' ').replace(/_/g, ' ').split(' ').map((word: string) => 
               word.charAt(0).toUpperCase() + word.slice(1)
             ).join(' '),
             provider: 'ollama' as ProviderType,
@@ -204,7 +204,7 @@ export const useModelStore = defineStore('models', () => {
           const openaiModels = await electronApi.getOpenAIModels(config?.apiKey, config?.baseUrl)
           models = openaiModels.map((model: any) => ({
             id: model.id,
-            name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map(word => 
+            name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map((word: string) => 
               word.charAt(0).toUpperCase() + word.slice(1)
             ).join(' '),
             provider: 'openai' as ProviderType,
@@ -216,7 +216,7 @@ export const useModelStore = defineStore('models', () => {
           const deepseekModels = await electronApi.getDeepSeekModels(config?.apiKey)
           models = deepseekModels.map((model: any) => ({
             id: model.id,
-            name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map(word => 
+            name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map((word: string) => 
               word.charAt(0).toUpperCase() + word.slice(1)
             ).join(' '),
             provider: 'deepseek' as ProviderType,
@@ -228,7 +228,7 @@ export const useModelStore = defineStore('models', () => {
           const anthropicModels = await electronApi.getAnthropicModels(config?.apiKey)
           models = anthropicModels.map((model: any) => ({
             id: model.id,
-            name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map(word => 
+            name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map((word: string) => 
               word.charAt(0).toUpperCase() + word.slice(1)
             ).join(' '),
             provider: 'anthropic' as ProviderType,
@@ -240,7 +240,7 @@ export const useModelStore = defineStore('models', () => {
           const cerebrasModels = await electronApi.getCerebrasModels(config?.apiKey)
           models = cerebrasModels.map((model: any) => ({
             id: model.id,
-            name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map(word => 
+            name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map((word: string) => 
               word.charAt(0).toUpperCase() + word.slice(1)
             ).join(' '),
             provider: 'cerebras' as ProviderType,
@@ -252,7 +252,7 @@ export const useModelStore = defineStore('models', () => {
           const dashscopeModels = await electronApi.getDashScopeModels(config?.apiKey)
           models = dashscopeModels.map((model: any) => ({
             id: model.id,
-            name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map(word => 
+            name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map((word: string) => 
               word.charAt(0).toUpperCase() + word.slice(1)
             ).join(' '),
             provider: 'dashscope' as ProviderType,
