@@ -63,8 +63,8 @@ export const electronApi = {
   },
 
   // Generate AI tree structure for workspace
-  generateWorkspaceTree: (description: string): Promise<{ success: boolean, tree: GeneratedTreeNode[] }> => {
-    return window.ipcRenderer.invoke('generate-workspace-tree', { description })
+  generateWorkspaceTree: (description: string, provider?: string, modelId?: string): Promise<{ success: boolean, tree: GeneratedTreeNode[] }> => {
+    return window.ipcRenderer.invoke('generate-workspace-tree', { description, provider, modelId })
   },
 
   // Create workspace with AI-generated tree

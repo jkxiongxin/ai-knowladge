@@ -237,9 +237,9 @@ app.whenReady().then(() => {
   })
 
   // Generate AI tree structure for new workspace
-  ipcMain.handle('generate-workspace-tree', async (_, { description }: { description: string }) => {
+  ipcMain.handle('generate-workspace-tree', async (_, { description, provider, modelId }: { description: string, provider?: string, modelId?: string }) => {
     try {
-      const tree = await generateWorkspaceTree(description)
+      const tree = await generateWorkspaceTree(description, { provider, modelId })
       return { success: true, tree }
     } catch (err: any) {
       console.error('Failed to generate workspace tree:', err)

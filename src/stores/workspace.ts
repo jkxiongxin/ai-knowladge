@@ -49,11 +49,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function generateWorkspaceTree(description: string) {
+  async function generateWorkspaceTree(description: string, provider?: string, modelId?: string) {
     isLoading.value = true
     error.value = null
     try {
-      const result = await electronApi.generateWorkspaceTree(description)
+      const result = await electronApi.generateWorkspaceTree(description, provider, modelId)
       return result.tree
     } catch (err: any) {
       console.error('Failed to generate workspace tree:', err)

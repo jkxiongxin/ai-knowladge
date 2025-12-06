@@ -62,11 +62,19 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   openrouter: 'https://openrouter.ai/api/v1',
 }
 
-export async function callLLM(messages: ChatMessage[], onProgress?: (chunk: string) => void): Promise<string> {
+export async function callLLM(
+  messages: ChatMessage[],
+  onProgress?: (chunk: string) => void,
+  options?: { provider?: string, modelId?: string, providerConfig?: ProviderConfig }
+): Promise<string> {
   // Load active model and provider config
-  const activeModel = getActiveModel()
-  const providerConfig = getProviderConfig(activeModel.provider)
-  
+  // Allow overrides (from UI) or fall back to saved active model
+  const activeModel = options?.provider || options?.modelId ?
+    { provider: options?.provider || getActiveModel().provider, modelId: options?.modelId || getActiveModel().modelId } :
+    getActiveModel()
+
+  const providerConfig = options?.providerConfig ?? getProviderConfig(activeModel.provider)
+
   const provider = activeModel.provider
   const model = activeModel.modelId
   const baseUrl = providerConfig?.baseUrl || DEFAULT_BASE_URLS[provider] || 'http://localhost:11434'
@@ -95,6 +103,15 @@ export async function callLLM(messages: ChatMessage[], onProgress?: (chunk: stri
   // Handle Anthropic separately (different API format)
   if (provider === 'anthropic') {
     return callAnthropicLLM(messages, model, apiKey, baseUrl, temperature, maxTokens, topP)
+  }
+
+  const MAX_RETRIES = 2
+  const RETRY_DELAY_MS = 350
+
+  function isConnectionRefusedErr(err: any) {
+    if (!err) return false
+    const msg = String(err.message || err)
+    return msg.includes('ECONNREFUSED') || msg.includes('ERR_CONNECTION_REFUSED') || msg.includes('connect ECONNREFUSED')
   }
 
   return new Promise((resolve, reject) => {
@@ -282,6 +299,45 @@ export async function callLLM(messages: ChatMessage[], onProgress?: (chunk: stri
     })
 
     request.on('error', (error) => {
+      // Provide actionable error messages for common network failures
+            if (isConnectionRefusedErr(error)) {
+        const hint = `Cannot connect to LLM provider '${provider}' at ${baseUrl}. Is the service running or the base URL/API key configured correctly? (Original: ${error.message})`
+        // If this is recoverable we can attempt a few retries
+        let attempts = 0
+        ;(function tryRetry() {
+          if (attempts >= MAX_RETRIES) {
+            reject(new Error(hint))
+            return
+          }
+          attempts++
+          setTimeout(() => {
+            const retryReq = net.request({ method: 'POST', url: apiEndpoint })
+            retryReq.setHeader('Content-Type', 'application/json')
+            if (apiKey) retryReq.setHeader('Authorization', `Bearer ${apiKey}`)
+            retryReq.write(body)
+            retryReq.on('response', (resp) => {
+              // We'll let normal processing continue by reusing the same 'response' handlers — here simply resolve by reading all.
+              let data = ''
+              resp.on('data', (chunk) => { data += chunk.toString() })
+              resp.on('end', () => {
+                if (resp.statusCode === 200) {
+                  resolve(data)
+                } else {
+                  tryRetry()
+                }
+              })
+            })
+            retryReq.on('error', (err) => {
+              if (isConnectionRefusedErr(err)) tryRetry()
+              else reject(err)
+            })
+            retryReq.end()
+          }, RETRY_DELAY_MS)
+        })()
+        return
+      }
+
+      // For other errors, propagate
       reject(error)
     })
 
@@ -408,7 +464,7 @@ export interface GeneratedTreeNode {
   children?: GeneratedTreeNode[]
 }
 
-export async function generateWorkspaceTree(description: string): Promise<GeneratedTreeNode[]> {
+export async function generateWorkspaceTree(description: string, options?: { provider?: string, modelId?: string }): Promise<GeneratedTreeNode[]> {
   const systemPrompt = `You are a knowledge architect. Based on the user's description of a topic or project, generate a hierarchical tree structure of knowledge cards. Each card should have a title and a brief summary.
 
 Output a JSON array of nodes. Each node has:
@@ -425,7 +481,32 @@ IMPORTANT: Output ONLY valid JSON, no markdown code blocks, no explanations. Jus
     { role: 'user', content: `Create a knowledge tree structure for: ${description}` }
   ]
 
-  const raw = await callLLM(messages)
+  // Preflight: check provider availability quickly to return a friendly message
+  const activeModel = options?.provider || options?.modelId ? { provider: options?.provider || getActiveModel().provider, modelId: options?.modelId || getActiveModel().modelId } : getActiveModel()
+  const providerConfig = getProviderConfig(activeModel.provider)
+  const provider = activeModel.provider
+  const baseUrl = providerConfig?.baseUrl || DEFAULT_BASE_URLS[provider] || 'http://localhost:11434'
+
+  // Simple availability probe
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const url = baseUrl.replace(/\/$/, '')
+      const probeUrl = provider === 'ollama' ? `${url}/v1` : url
+      const req = net.request({ method: 'GET', url: probeUrl })
+      req.on('response', (resp) => {
+        // Treat any reachable response as success — we only need a connection
+        resp.on('data', () => {})
+        resp.on('end', () => resolve())
+      })
+      req.on('error', (err) => reject(err))
+      req.end()
+    })
+  } catch (err: any) {
+    console.error('Provider availability check failed for', provider, baseUrl, err)
+    throw new Error(`无法连接到 LLM 提供商 '${provider}' (${baseUrl}): ${err.message || err}. 请检查提供商地址或在设置中选择其他模型。`)
+  }
+
+  const raw = await callLLM(messages, undefined, options)
 
   // Clean and parse response
   try {

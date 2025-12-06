@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWorkspaceStore } from '@/stores/workspace'
 import type { Workspace } from '@/api'
@@ -21,6 +21,55 @@ const editDescription = ref('')
 const useAIGenerate = ref(false)
 const aiGenerating = ref(false)
 const aiDescription = ref('')
+// Model selection for AI generation
+import { useModelStore } from '@/stores/models'
+const modelStore = useModelStore()
+const showModelSelector = ref(false)
+const selectedProviderId = ref<string | null>(null)
+const selectedModelId = ref<string | null>(null)
+
+onMounted(() => {
+  modelStore.loadSettings()
+})
+
+// When dialog is shown, default-select the first model if available
+watch(() => showCreateDialog.value, (val) => {
+  if (!val) return
+  // Prefill selection to first available model if any
+  const providers = modelStore.enabledProviders
+  let pickedProvider: string | null = null
+  let pickedModel: string | null = null
+  for (const p of providers) {
+    if (p.models && p.models.length > 0) {
+      pickedProvider = p.id
+      pickedModel = p.models[0].id
+      break
+    }
+  }
+  selectedProviderId.value = pickedProvider
+  selectedModelId.value = pickedModel
+})
+
+function selectModel(providerId: string, modelId: string) {
+  selectedProviderId.value = providerId
+  selectedModelId.value = modelId
+  showModelSelector.value = false
+}
+
+function getSelectedModelLabel() {
+  if (!selectedProviderId.value || !selectedModelId.value) return null
+  const p = modelStore.enabledProviders.find(x => x.id === selectedProviderId.value)
+  if (!p) return selectedModelId.value
+  const m = p.models.find(x => x.id === selectedModelId.value)
+  return m ? m.name : selectedModelId.value
+}
+
+function hasAnyModels(): boolean {
+  for (const p of modelStore.enabledProviders) {
+    if (p.models && p.models.length > 0) return true
+  }
+  return false
+}
 
 onMounted(() => {
   store.loadWorkspaces()
@@ -49,7 +98,10 @@ async function handleCreate() {
       // AI generate tree structure
       aiGenerating.value = true
       try {
-        const tree = await store.generateWorkspaceTree(aiDescription.value.trim())
+        // require user to select a provider/model when using AI generation
+        const provider = selectedProviderId.value || undefined
+        const modelId = selectedModelId.value || undefined
+        const tree = await store.generateWorkspaceTree(aiDescription.value.trim(), provider, modelId)
         workspace = await store.createWorkspaceWithTree(
           newWorkspaceName.value.trim(),
           newWorkspaceDescription.value.trim() || undefined,
@@ -316,6 +368,52 @@ async function handleImport() {
                   rows="4"
                   class="w-full px-3 py-2 border-2 border-ink/20 rounded-lg focus:border-ink focus:outline-none resize-none"
                 ></textarea>
+                <!-- Model selector (mimic Chat Drawer selector) -->
+                <div class="mt-3">
+                  <label class="block text-sm font-medium text-ink mb-1">选择模型</label>
+                  <div class="relative">
+                    <button
+                      @click="showModelSelector = !showModelSelector"
+                      class="flex items-center gap-2 px-3 py-2 bg-white border border-ink/20 rounded-lg hover:bg-gray-50 text-sm w-full justify-between"
+                    >
+                      <span class="flex items-center gap-2">
+                        <span v-if="selectedProviderId && selectedModelId">
+                          <!-- Show selected model name -->
+                          <span class="font-medium text-ink">{{ getSelectedModelLabel() }}</span>
+                        </span>
+                        <span v-else class="text-gray-400">请选择模型</span>
+                      </span>
+                      <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z" clip-rule="evenodd" />
+                      </svg>
+                    </button>
+
+                    <div v-if="showModelSelector" class="absolute top-full left-0 right-0 mt-1 bg-white border border-ink/20 rounded-lg shadow-lg z-50 max-h-56 overflow-y-auto">
+                      <div v-for="provider in modelStore.enabledProviders" :key="provider.id" class="border-b border-ink/10 last:border-0">
+                        <div class="px-3 py-1.5 text-xs font-medium text-gray-500 bg-gray-50">
+                          {{ provider.icon }} {{ provider.name }}
+                        </div>
+                        <button
+                          v-for="model in provider.models"
+                          :key="model.id"
+                            @click="selectModel(provider.id, model.id)"
+                          :class="[
+                            'w-full text-left px-3 py-2 text-sm hover:bg-blue-50 transition-colors',
+                            selectedProviderId === provider.id && selectedModelId === model.id ? 'bg-blue-50 text-blue-700' : 'text-gray-700'
+                          ]"
+                        >
+                          {{ model.name }}
+                        </button>
+                      </div>
+                      <div v-if="modelStore.enabledProviders.length === 0" class="px-3 py-4 text-sm text-gray-500 text-center">
+                        暂无可用模型，请先在设置中启用
+                      </div>
+                    </div>
+
+                    <!-- click outside overlay -->
+                    <div v-if="showModelSelector" @click="showModelSelector = false" class="fixed inset-0 z-40"></div>
+                  </div>
+                </div>
                 <p class="text-xs text-ink/60 mt-1">AI 将根据描述生成一个初始的卡片树结构</p>
               </div>
             </div>
@@ -331,7 +429,7 @@ async function handleImport() {
             </button>
             <button
               @click="handleCreate"
-              :disabled="!newWorkspaceName.trim() || aiGenerating || (useAIGenerate && !aiDescription.trim())"
+              :disabled="!newWorkspaceName.trim() || aiGenerating || (useAIGenerate && !aiDescription.trim()) || (useAIGenerate && hasAnyModels() && !selectedModelId)"
               class="px-4 py-2 bg-ink text-paper rounded-lg hover:bg-ink/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               <span v-if="aiGenerating" class="animate-spin">⏳</span>
