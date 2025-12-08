@@ -36,7 +36,7 @@ import {
   getAllCardsSummary
 } from './db'
 import { getUpstreamContext, buildSystemPrompt } from './context'
-import { callLLM, generateSummary, generateWorkspaceTree, type GeneratedTreeNode } from './llm'
+import { callLLM, generateSummary, generateWorkspaceTree, generateChildNodes, type GeneratedTreeNode, type GeneratedChildNode } from './llm'
 
 // The built directory structure
 //
@@ -373,6 +373,17 @@ app.whenReady().then(() => {
 
   ipcMain.handle('update-card-summary', (_, { id, summary }) => {
     return updateCardSummary(id, summary)
+  })
+
+  // Generate child nodes for a card using AI
+  ipcMain.handle('generate-child-nodes', async (_, { cardId, title, summary, provider, modelId }: { cardId: string, title: string, summary: string, provider?: string, modelId?: string }) => {
+    try {
+      const children = await generateChildNodes(title, summary, { provider, modelId })
+      return { success: true, children }
+    } catch (err: any) {
+      console.error('Failed to generate child nodes:', err)
+      throw new Error(`生成子节点失败: ${err.message}`)
+    }
   })
 
   // Manual summary generation for a card

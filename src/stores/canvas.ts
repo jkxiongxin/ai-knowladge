@@ -37,6 +37,9 @@ export const useCanvasStore = defineStore('canvas', () => {
   const isChatOpen = ref(false)
   const messages = ref<Message[]>([])
   const isGenerating = ref(false)
+  // Global busy/blocking state used by long-running actions (e.g. generating card summary)
+  const globalBusy = ref(false)
+  const globalBusyMessage = ref<string | null>(null)
   // Selected messages map per card (for context selection)
   const selectedMessages = ref<Record<string, Set<string>>>({})
 
@@ -58,6 +61,16 @@ export const useCanvasStore = defineStore('canvas', () => {
     } finally {
       isLoading.value = false
     }
+  }
+
+  function setGlobalBusy(message?: string) {
+    globalBusy.value = true
+    globalBusyMessage.value = message || null
+  }
+
+  function clearGlobalBusy() {
+    globalBusy.value = false
+    globalBusyMessage.value = null
   }
 
   async function loadCanvas() {
@@ -99,6 +112,9 @@ export const useCanvasStore = defineStore('canvas', () => {
 
   // --- Actions ---
 
+  // State for AI generation
+  const isGeneratingChildren = ref(false)
+
   async function addCard(x: number, y: number, skipHistory = false) {
     console.log('addCard called with coordinates:', { x, y })
     if (!workspaceId.value) {
@@ -136,6 +152,96 @@ export const useCanvasStore = defineStore('canvas', () => {
       console.log('Node added to VueFlow:', newNode)
     } catch (error) {
       console.error('Error creating card:', error)
+    }
+  }
+
+  // Generate child nodes using AI and connect them to parent card
+  async function generateChildCards(parentId: string): Promise<void> {
+    if (!workspaceId.value) {
+      throw new Error('No workspace ID')
+    }
+    
+    const parentNode = nodes.value.find(n => n.id === parentId)
+    if (!parentNode) {
+      throw new Error('Parent card not found')
+    }
+
+    isGeneratingChildren.value = true
+    
+    try {
+      const { success, children } = await electronApi.generateChildNodes(
+        parentId,
+        parentNode.data.title,
+        parentNode.data.summary || ''
+      )
+      
+      if (!success || !children || children.length === 0) {
+        throw new Error('未能生成子节点')
+      }
+
+      // Calculate positions for child cards
+      // Place them below and spread horizontally from the parent
+      const parentX = parentNode.position.x
+      const parentY = parentNode.position.y
+      const parentWidth = parentNode.data.width || 250
+      const parentHeight = parentNode.data.height || 150
+      
+      const childSpacingX = 280 // Horizontal spacing between children
+      const childOffsetY = parentHeight + 100 // Vertical offset from parent
+      
+      // Calculate starting X position to center children under parent
+      const totalWidth = (children.length - 1) * childSpacingX
+      const startX = parentX + parentWidth / 2 - totalWidth / 2
+
+      // Create child cards and connections
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i]
+        const childX = startX + i * childSpacingX - 125 // Center the card (250/2 = 125)
+        const childY = parentY + childOffsetY
+
+        // Create the child card
+        const newCard = await electronApi.createCard({
+          workspace_id: workspaceId.value,
+          x: childX,
+          y: childY,
+          title: child.title,
+          summary: child.summary,
+          status: 'todo'
+        })
+
+        const newNode: Node = {
+          id: newCard.id,
+          type: 'scribble',
+          position: { x: newCard.x, y: newCard.y },
+          data: { 
+            title: newCard.title, 
+            summary: newCard.summary, 
+            status: newCard.status 
+          },
+        }
+        
+        nodes.value.push(newNode)
+        historyStore.pushCanvas({ type: 'node_add', cardId: newCard.id, data: { node: newCard } })
+
+        // Create connection from parent to child
+        const newConn = await electronApi.createConnection({
+          workspace_id: workspaceId.value,
+          source_card_id: parentId,
+          target_card_id: newCard.id
+        })
+
+        edges.value.push({
+          id: newConn.id,
+          source: newConn.source_card_id,
+          target: newConn.target_card_id,
+          animated: true,
+          style: { stroke: '#2c3e50', strokeWidth: 2 },
+          markerEnd: ({ type: 'arrowclosed', color: '#2c3e50' } as any)
+        })
+        historyStore.pushCanvas({ type: 'edge_add', cardId: newConn.id, data: { edge: newConn } })
+      }
+    } finally {
+      isGeneratingChildren.value = false
     }
   }
 
@@ -305,10 +411,22 @@ export const useCanvasStore = defineStore('canvas', () => {
 
   function clearSelection() {
     selectedNodeIds.value.clear()
+    // Also clear VueFlow's selected state
+    nodes.value.forEach(n => { (n as any).selected = false })
+  }
+
+  function setSelectedNodes(ids: string[]) {
+    selectedNodeIds.value.clear()
+    ids.forEach(id => selectedNodeIds.value.add(id))
+    // Sync VueFlow's selected state
+    nodes.value.forEach(n => { (n as any).selected = ids.includes(n.id) })
   }
 
   function selectAll() {
-    nodes.value.forEach(n => selectedNodeIds.value.add(n.id))
+    nodes.value.forEach(n => {
+      selectedNodeIds.value.add(n.id)
+      ;(n as any).selected = true
+    })
   }
 
   function copySelectedNodes() {
@@ -625,6 +743,16 @@ export const useCanvasStore = defineStore('canvas', () => {
   function onNodesChange(changes: NodeChange[]) {
     // Apply changes to local state
     nodes.value = applyNodeChanges(changes, nodes.value as any) as any
+
+    // Keep our selectedNodeIds in sync when VueFlow emits selection changes
+    for (const ch of changes) {
+      // NodeChange for selection looks like { id, type: 'select', selected: boolean }
+      if ((ch as any).type === 'select') {
+        const nodeId = (ch as any).id
+        if ((ch as any).selected) selectedNodeIds.value.add(nodeId)
+        else selectedNodeIds.value.delete(nodeId)
+      }
+    }
     
     // Handle specific changes like 'position' dragging end
     // Note: applyNodeChanges handles the immediate visual update.
@@ -849,6 +977,7 @@ export const useCanvasStore = defineStore('canvas', () => {
     deselectNode,
     toggleNodeSelection,
     clearSelection,
+    setSelectedNodes,
     selectAll,
     copySelectedNodes,
     pasteNodes,
@@ -858,6 +987,11 @@ export const useCanvasStore = defineStore('canvas', () => {
     isChatOpen,
     messages,
     isGenerating,
+    // Global busy/blocking state
+    globalBusy,
+    globalBusyMessage,
+    setGlobalBusy,
+    clearGlobalBusy,
     selectedMessages,
     openChat,
     closeChat,
@@ -865,6 +999,9 @@ export const useCanvasStore = defineStore('canvas', () => {
     editMessageContent,
     resendFromMessage,
     insertCardReference,
-    getAvailableCards
+    getAvailableCards,
+    // AI Child Node Generation
+    isGeneratingChildren,
+    generateChildCards
   }
 })

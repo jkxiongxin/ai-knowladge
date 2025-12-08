@@ -8,6 +8,11 @@ export interface GeneratedTreeNode {
   children?: GeneratedTreeNode[]
 }
 
+export interface GeneratedChildNode {
+  title: string
+  summary: string
+}
+
 export interface Workspace {
   id: string
   name: string
@@ -142,6 +147,11 @@ export const electronApi = {
 
   generateCardSummary: (cardId: string): Promise<string> => {
     return window.ipcRenderer.invoke('generate-card-summary', { cardId })
+  },
+
+  // Generate child nodes for a card using AI
+  generateChildNodes: (cardId: string, title: string, summary: string, provider?: string, modelId?: string): Promise<{ success: boolean, children: GeneratedChildNode[] }> => {
+    return window.ipcRenderer.invoke('generate-child-nodes', { cardId, title, summary, provider, modelId })
   },
 
   // Model Management

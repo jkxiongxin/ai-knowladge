@@ -2,7 +2,8 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { electronApi } from '@/api'
 import { 
-  type ProviderType, 
+  type ProviderType,
+  type BuiltInProviderType,
   type ProviderConfig, 
   type ActiveModel,
   type ModelConfig,
@@ -10,7 +11,7 @@ import {
 } from '@/types/models'
 
 export const useModelStore = defineStore('models', () => {
-  // Provider configurations (keyed by provider id)
+  // Provider configurations (keyed by provider id, supports both built-in and custom)
   const providers = ref<Record<ProviderType, ProviderConfig>>({} as Record<ProviderType, ProviderConfig>)
   
   // Currently active model for chat
@@ -25,6 +26,7 @@ export const useModelStore = defineStore('models', () => {
   function initProviders() {
     const defaultProviders: Record<ProviderType, ProviderConfig> = {} as Record<ProviderType, ProviderConfig>
     
+    // Initialize built-in providers
     for (const [key, def] of Object.entries(PROVIDER_DEFINITIONS)) {
       defaultProviders[key as ProviderType] = {
         // Use provider metadata (name/baseUrl/etc) but do not pre-populate models — user should add or sync explicitly
@@ -38,7 +40,8 @@ export const useModelStore = defineStore('models', () => {
         maxTokens: def.maxTokens,
         topP: def.topP,
         apiKey: '',
-        enabled: key === 'ollama' // Ollama still enabled by default for dev convenience
+        enabled: key === 'ollama', // Ollama still enabled by default for dev convenience
+        providerType: 'builtin'
       }
     }
     
@@ -86,8 +89,10 @@ export const useModelStore = defineStore('models', () => {
         try {
           const savedProviders = JSON.parse(saved.providers)
           for (const [key, config] of Object.entries(savedProviders)) {
+            const parsed = config as Partial<ProviderConfig>
+            
+            // If it's a built-in provider, merge with defaults
             if (providers.value[key as ProviderType]) {
-              const parsed = config as Partial<ProviderConfig>
               providers.value[key as ProviderType] = {
                 ...providers.value[key as ProviderType],
                 apiKey: parsed.apiKey ?? providers.value[key as ProviderType].apiKey,
@@ -98,6 +103,24 @@ export const useModelStore = defineStore('models', () => {
                 topP: parsed.topP ?? providers.value[key as ProviderType].topP,
                 // If stored, restore the models array (backwards compatible)
                 models: parsed.models ?? providers.value[key as ProviderType].models
+              }
+            } else {
+              // It's a custom provider, restore it completely
+              if (parsed.providerType === 'custom') {
+                providers.value[key] = {
+                  id: key,
+                  name: parsed.name || '自定义',
+                  description: parsed.description || 'OpenAI 兼容 API',
+                  icon: parsed.icon || '🔧',
+                  baseUrl: parsed.baseUrl || '',
+                  apiKey: parsed.apiKey || '',
+                  enabled: parsed.enabled ?? false,
+                  models: parsed.models || [],
+                  temperature: parsed.temperature ?? 0.7,
+                  maxTokens: parsed.maxTokens ?? 4096,
+                  topP: parsed.topP ?? 0.9,
+                  providerType: 'custom'
+                }
               }
             }
           }
@@ -134,10 +157,16 @@ export const useModelStore = defineStore('models', () => {
           enabled: config.enabled,
           temperature: config.temperature,
           maxTokens: config.maxTokens,
-          topP: config.topP
-          ,
+          topP: config.topP,
           // Persist models so they survive restarts (keeps custom added models and latest sync snapshot)
-          models: config.models || []
+          models: config.models || [],
+          // For custom providers, also save name, description, icon, providerType
+          ...(config.providerType === 'custom' && {
+            name: config.name,
+            description: config.description,
+            icon: config.icon,
+            providerType: config.providerType
+          })
         }
       }
       await electronApi.saveSetting('providers', JSON.stringify(providersToSave))
@@ -187,6 +216,25 @@ export const useModelStore = defineStore('models', () => {
     try {
       let models: any[] = []
       
+      // Check if this is a custom provider
+      const provider = providers.value[providerId]
+      const isCustomProvider = provider?.providerType === 'custom'
+      
+      if (isCustomProvider) {
+        // Custom provider: treat as OpenAI-compatible endpoint
+        const customModels = await electronApi.getOpenAIModels(config?.apiKey, config?.baseUrl)
+        models = customModels.map((model: any) => ({
+          id: model.id,
+          name: model.id.replace(/-/g, ' ').replace(/_/g, ' ').split(' ').map((word: string) => 
+            word.charAt(0).toUpperCase() + word.slice(1)
+          ).join(' '),
+          provider: providerId,
+          contextLength: getModelContextLength(model.id)
+        }))
+        return models
+      }
+      
+      // Handle built-in providers
       switch (providerId) {
         case 'ollama':
           const ollamaModels = await electronApi.getOllamaModels(config?.baseUrl)
@@ -335,6 +383,53 @@ export const useModelStore = defineStore('models', () => {
     }
   }
 
+  // Add a new custom provider
+  function addCustomProvider(name: string, baseUrl: string, apiKey: string = '') {
+    // Generate a unique ID
+    let customId = 1
+    while (providers.value[`custom-${customId}`]) {
+      customId++
+    }
+    
+    const newProviderId = `custom-${customId}`
+    
+    providers.value[newProviderId] = {
+      id: newProviderId,
+      name: name || '自定义提供商',
+      description: 'OpenAI 兼容 API',
+      icon: '🔧',
+      baseUrl: baseUrl,
+      apiKey: apiKey,
+      enabled: true,
+      models: [],
+      temperature: 0.7,
+      maxTokens: 4096,
+      topP: 0.9,
+      providerType: 'custom'
+    }
+    
+    saveSettings()
+    return newProviderId
+  }
+
+  // Delete a custom provider
+  function deleteCustomProvider(providerId: ProviderType) {
+    const provider = providers.value[providerId]
+    if (provider && provider.providerType === 'custom') {
+      delete providers.value[providerId]
+      
+      // If the active model was from this provider, reset to default
+      if (activeModel.value.provider === providerId) {
+        activeModel.value = {
+          provider: 'ollama',
+          modelId: 'llama3'
+        }
+      }
+      
+      saveSettings()
+    }
+  }
+
   return {
     providers,
     activeModel,
@@ -350,6 +445,8 @@ export const useModelStore = defineStore('models', () => {
     addCustomModel,
     removeCustomModel,
     fetchModelsFromProvider,
-    syncProviderModels
+    syncProviderModels,
+    addCustomProvider,
+    deleteCustomProvider
   }
 })

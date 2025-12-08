@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, computed, watch } from 'vue'
+import { onMounted, onUnmounted, ref, computed, watch, provide } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { VueFlow, useVueFlow } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
@@ -10,6 +10,7 @@ import ScribbleCard from '@/components/ScribbleCard.vue'
 import ChatDrawer from '@/components/ChatDrawer.vue'
 // ToolBar removed as per UX decision
 import ContextMenu, { type MenuItem } from '@/components/ContextMenu.vue'
+import SearchOverlay from '@/components/SearchOverlay.vue'
 
 // Import default styles
 import '@vue-flow/core/dist/style.css'
@@ -25,13 +26,17 @@ const router = useRouter()
 const route = useRoute()
 const store = useCanvasStore()
 const workspaceStore = useWorkspaceStore()
-const { onNodeDragStop, onConnect, addEdges, screenToFlowCoordinate, onPaneClick } = useVueFlow()
+const { onNodeDragStop, onConnect, addEdges, screenToFlowCoordinate, onPaneClick, getTransform, setCenter } = useVueFlow()
 
 // Tool state (kept for behavior but toolbar UI removed)
 type ToolType = 'select' | 'card' | 'note' | 'image'
 const activeTool = ref<ToolType>('select')
 const contextMenuRef = ref<InstanceType<typeof ContextMenu> | null>(null)
 const pendingContextPosition = ref<{ x: number, y: number } | null>(null)
+
+// Canvas interaction mode: 'pan' for dragging canvas, 'select' for box selection
+type InteractionMode = 'pan' | 'select'
+const interactionMode = ref<InteractionMode>('pan')
 
 // Context menu items - computed so paste can reflect clipboard state
 const contextMenuItems = computed<MenuItem[]>(() => [
@@ -51,6 +56,7 @@ const canRedo = computed(() => store.canRedoCanvas ? store.canRedoCanvas() : fal
 // Computed: cursor style based on active tool
 const canvasCursor = computed(() => {
   if (store.isLoading) return 'wait'
+  if (interactionMode.value === 'select') return 'crosshair'
   switch (activeTool.value) {
     case 'card':
     case 'note':
@@ -108,6 +114,12 @@ onMounted(() => {
       ev.preventDefault()
       store.selectAll()
     }
+    // Cmd/Ctrl+F = search overlay
+    const fKey = ev.key.toLowerCase() === 'f'
+    if ((ev.metaKey || ev.ctrlKey) && fKey) {
+      ev.preventDefault()
+      showSearch.value = true
+    }
     // Delete/Backspace = delete selected
     if (isDelete && store.selectedNodeIds.size > 0) {
       ev.preventDefault()
@@ -118,6 +130,37 @@ onMounted(() => {
   window.addEventListener('keydown', onKey)
   // remove listener when unmounted
   onUnmounted(() => window.removeEventListener('keydown', onKey))
+})
+
+const showSearch = ref(false)
+
+function onSearchSelect(id: string) {
+  // Find node and center it
+  const node = store.nodes.find(n => n.id === id)
+  if (!node) return
+  const centerX = (node.position.x || 0) + ((node.data.width || 250) / 2)
+  const centerY = (node.position.y || 0) + ((node.data.height || 150) / 2)
+  setCenter(centerX, centerY)
+  store.selectNode(id)
+}
+
+// Viewport zoom provider — update reactive zoom value for nodes to use
+const viewportZoom = ref<number>(getTransform().zoom || 1)
+provide('viewportZoom', viewportZoom)
+
+let rafId: number | null = null
+function trackZoomLoop() {
+  const t = getTransform()
+  if (t && t.zoom !== viewportZoom.value) viewportZoom.value = t.zoom
+  rafId = requestAnimationFrame(trackZoomLoop)
+}
+
+onMounted(() => {
+  rafId = requestAnimationFrame(trackZoomLoop)
+})
+
+onUnmounted(() => {
+  if (rafId) cancelAnimationFrame(rafId)
 })
 
 // Watch for node/edge removals performed by VueFlow (e.g., via Delete/Backspace)
@@ -160,18 +203,24 @@ const dragStartPositions = new Map<string, { x: number, y: number }>()
 
 function onDragStart(event: any) {
   try {
-    const { id, position } = event.node
-    dragStartPositions.set(id, { x: position.x, y: position.y })
+    // Handle both single node and multiple nodes drag
+    const nodes = event.nodes || [event.node]
+    nodes.forEach((node: any) => {
+      dragStartPositions.set(node.id, { x: node.position.x, y: node.position.y })
+    })
   } catch (err) {
     // ignore
   }
 }
 
 function onDragStop(event: any) {
-  const { id, position } = event.node
-  const prev = dragStartPositions.get(id)
-  store.updateNodePosition(id, position.x, position.y, prev?.x, prev?.y)
-  dragStartPositions.delete(id)
+  // Handle both single node and multiple nodes drag
+  const nodes = event.nodes || [event.node]
+  nodes.forEach((node: any) => {
+    const prev = dragStartPositions.get(node.id)
+    store.updateNodePosition(node.id, node.position.x, node.position.y, prev?.x, prev?.y)
+    dragStartPositions.delete(node.id)
+  })
 }
 
 function onConnectHandler(params: any) {
@@ -257,6 +306,9 @@ function onContextMenuSelect(item: MenuItem) {
 function onToolChange(tool: ToolType) {
   activeTool.value = tool
 }
+
+// Handle VueFlow selection change (box selection)
+// selection changes are handled via nodes-change -> store.onNodesChange
 </script>
 
 <template>
@@ -265,13 +317,19 @@ function onToolChange(tool: ToolType) {
       v-model:nodes="store.nodes"
       v-model:edges="store.edges"
       :class="[`cursor-${canvasCursor}`]"
+      :min-zoom="0.15"
+      :max-zoom="2.5"
       :zoom-on-double-click="false"
-      :pan-on-drag="activeTool === 'select'"
+      :pan-on-drag="interactionMode === 'pan'"
+      :selection-on-drag="interactionMode === 'select'"
+      :selection-key-code="interactionMode === 'select'"
       :delete-key-code="null"
+      
       @node-drag-start="onDragStart"
       @node-drag-stop="onDragStop"
       @connect="onConnectHandler"
       @pane-context-menu="onPaneContextMenu"
+      @nodes-change="store.onNodesChange"
     >
       <!-- Custom Node Types -->
       <template #node-scribble="props">
@@ -332,11 +390,69 @@ function onToolChange(tool: ToolType) {
     <!-- Chat Drawer -->
     <ChatDrawer />
 
-    
+    <!-- Search Overlay -->
+    <SearchOverlay :visible="showSearch" @close="showSearch = false" @select="onSearchSelect" />
+
+    <!-- Bottom Mode Switcher -->
+    <div class="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 bg-white rounded-lg shadow-lg p-1">
+      <button
+        @click="interactionMode = 'pan'"
+        :class="[
+          'flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-all',
+          interactionMode === 'pan' 
+            ? 'bg-blue-50 text-blue-700 shadow-sm' 
+            : 'text-gray-600 hover:bg-gray-100'
+        ]"
+        title="拖动模式 - 拖拽画布平移"
+      >
+        <!-- Hand/Pan Icon -->
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11m0-5.5a1.5 1.5 0 013 0v3m0 0V11" />
+        </svg>
+        <span>拖动</span>
+      </button>
+      <button
+        @click="interactionMode = 'select'"
+        :class="[
+          'flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-all',
+          interactionMode === 'select' 
+            ? 'bg-blue-50 text-blue-700 shadow-sm' 
+            : 'text-gray-600 hover:bg-gray-100'
+        ]"
+        title="选择模式 - 框选多个卡片"
+      >
+        <!-- Selection Box Icon -->
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="3 3" d="M4 6a2 2 0 012-2h12a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V6z" />
+        </svg>
+        <span>框选</span>
+      </button>
+      
+      <!-- Selection count indicator -->
+      <div 
+        v-if="store.selectedNodeIds.size > 0"
+        class="ml-2 px-2 py-1 bg-blue-100 text-blue-700 rounded-md text-xs font-medium"
+      >
+        已选 {{ store.selectedNodeIds.size }} 项
+      </div>
+    </div>
 
     <!-- Loading Overlay -->
-    <div v-if="store.isLoading" class="absolute inset-0 flex items-center justify-center bg-white/50 z-50">
+    <!-- Workspace loading overlay -->
+    <div v-if="store.isLoading" class="absolute inset-0 flex items-center justify-center bg-white/50 z-40 pointer-events-auto">
       <span class="text-xl font-scribble animate-pulse">正在加载你的知识宇宙...</span>
+    </div>
+
+    <!-- Global blocking overlay for long-running operations (e.g. generating summary) -->
+    <div v-if="store.globalBusy" class="fixed inset-0 z-[9999] flex items-center justify-center pointer-events-auto">
+      <div class="absolute inset-0 bg-black/40"></div>
+      <div class="z-60 bg-white rounded-lg p-6 shadow-xl flex flex-col items-center gap-3">
+        <svg class="animate-spin h-8 w-8 text-ink" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        <div class="text-sm text-gray-800">{{ store.globalBusyMessage || '正在处理，请稍候...' }}</div>
+      </div>
     </div>
   </div>
 </template>
@@ -370,5 +486,18 @@ function onToolChange(tool: ToolType) {
 }
 .cursor-wait {
   cursor: wait;
+}
+
+/* Selection box (marquee) styling */
+.vue-flow__selection {
+  background: rgba(59, 130, 246, 0.1) !important;
+  border: 2px dashed rgba(59, 130, 246, 0.6) !important;
+  border-radius: 4px;
+}
+
+/* Selected node highlight */
+.vue-flow__node.selected {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
 }
 </style>

@@ -164,13 +164,17 @@ function selectModel(providerId: string, modelId: string) {
 
 async function generateSummary() {
   if (!store.activeCardId) return
+  // Use the global blocking overlay so users know the app is busy
   try {
+    store.setGlobalBusy('正在生成摘要...')
     const summary = await electronApi.generateCardSummary(store.activeCardId)
     // update UI (store will receive card-summary-updated via IPC)
     await store.updateNodeSummary(store.activeCardId, summary)
   } catch (err: any) {
     console.error('Failed to generate summary:', err)
     alert('生成摘要失败：' + (err?.message || err))
+  } finally {
+    store.clearGlobalBusy()
   }
 }
 
@@ -394,9 +398,12 @@ function toggleMaximize() {
         <div class="flex items-center gap-3">
           <button
             @click="generateSummary"
-            :disabled="!hasHistory"
+            :disabled="!hasHistory || store.globalBusy"
             class="px-3 py-1 bg-ink text-white rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-          >生成摘要</button>
+          >
+            <span v-if="store.globalBusy">生成中...</span>
+            <span v-else>生成摘要</span>
+          </button>
 
           <button
             @click="selectionMode = !selectionMode"

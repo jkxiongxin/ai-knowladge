@@ -428,6 +428,8 @@ export async function generateSummary(history: ChatMessage[]): Promise<string> {
   const summaryPrompt = `
     Analyze the following conversation and provide a concise summary (max 3 sentences) of the key concepts, decisions, or facts established. 
     This summary will be used as context for future conversations.
+    不要解释，不要描述。
+    返回格式使用txt文本，不要使用任何Markdown代码块或其他格式。
     Focus on the "Knowledge" generated in this node.
   `
   
@@ -462,6 +464,80 @@ export interface GeneratedTreeNode {
   title: string
   summary: string
   children?: GeneratedTreeNode[]
+}
+
+/**
+ * Generates child nodes (sub-cards) for an existing card based on its summary.
+ * Returns an array of child cards with title and summary.
+ */
+export interface GeneratedChildNode {
+  title: string
+  summary: string
+}
+
+export async function generateChildNodes(parentTitle: string, parentSummary: string, options?: { provider?: string, modelId?: string }): Promise<GeneratedChildNode[]> {
+  const systemPrompt = `You are a knowledge architect. Based on the parent card's title and summary, generate 2-5 child nodes that break down the topic into subtopics or related concepts.
+
+Each child node should:
+- Have a clear, concise title (3-8 words)
+- Have a brief summary (1-2 sentences) describing what this subtopic covers
+- Be logically related to the parent topic
+- Together, the children should provide a comprehensive breakdown of the parent topic
+
+Output a JSON array of child nodes. Each node has:
+- "title": string (short, descriptive title)
+- "summary": string (1-2 sentence description)
+
+IMPORTANT: Output ONLY valid JSON, no markdown code blocks, no explanations. Just the raw JSON array.`
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Parent card title: ${parentTitle}\n\nParent card summary: ${parentSummary || '(empty summary)'}\n\nGenerate child nodes for this topic.` }
+  ]
+
+  // Preflight: check provider availability
+  const activeModel = options?.provider || options?.modelId ? { provider: options?.provider || getActiveModel().provider, modelId: options?.modelId || getActiveModel().modelId } : getActiveModel()
+  const providerConfig = getProviderConfig(activeModel.provider)
+  const provider = activeModel.provider
+  const baseUrl = providerConfig?.baseUrl || DEFAULT_BASE_URLS[provider] || 'http://localhost:11434'
+
+  // Simple availability probe
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const url = baseUrl.replace(/\/$/, '')
+      const probeUrl = provider === 'ollama' ? `${url}/v1` : url
+      const req = net.request({ method: 'GET', url: probeUrl })
+      req.on('response', (resp) => {
+        resp.on('data', () => {})
+        resp.on('end', () => resolve())
+      })
+      req.on('error', (err) => reject(err))
+      req.end()
+    })
+  } catch (err: any) {
+    console.error('Provider availability check failed for', provider, baseUrl, err)
+    throw new Error(`无法连接到 LLM 提供商 '${provider}' (${baseUrl}): ${err.message || err}. 请检查提供商地址或在设置中选择其他模型。`)
+  }
+
+  const raw = await callLLM(messages, undefined, options)
+
+  // Clean and parse response
+  try {
+    let cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim()
+    cleaned = cleaned.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '').trim()
+    
+    const startIdx = cleaned.indexOf('[')
+    const endIdx = cleaned.lastIndexOf(']')
+    if (startIdx !== -1 && endIdx !== -1) {
+      cleaned = cleaned.slice(startIdx, endIdx + 1)
+    }
+    
+    const children = JSON.parse(cleaned)
+    return children as GeneratedChildNode[]
+  } catch (e) {
+    console.error('Failed to parse child nodes response:', e, raw)
+    throw new Error('AI返回的格式无法解析，请重试')
+  }
 }
 
 export async function generateWorkspaceTree(description: string, options?: { provider?: string, modelId?: string }): Promise<GeneratedTreeNode[]> {

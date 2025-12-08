@@ -15,6 +15,23 @@ const selectedProvider = computed(() => {
   return modelStore.providers[selectedProviderId.value]
 })
 
+// Get built-in and custom providers separately
+const builtInProviders = computed(() => {
+  return Object.values(modelStore.providers).filter(p => p.providerType === 'builtin')
+})
+
+const customProviders = computed(() => {
+  return Object.values(modelStore.providers).filter(p => p.providerType === 'custom')
+})
+
+// Add custom provider form
+const showAddProviderForm = ref(false)
+const newProviderForm = ref({
+  name: '',
+  baseUrl: '',
+  apiKey: ''
+})
+
 // Form state for editing
 const editForm = ref({
   apiKey: '',
@@ -34,7 +51,7 @@ const newModel = ref({
 // Model management
 const isFetchingModels = ref(false)
 const fetchError = ref('')
-const availableRemoteModels = ref<Array<{ id: string; name: string; provider: string }>>([])
+const availableRemoteModels = ref<Array<{ id: string; name: string; provider: string; contextLength?: number }>>([])
 const showModelSelector = ref(false)
 const searchTerm = ref('')
 // Toggle to show/hide API key input
@@ -86,6 +103,31 @@ function toggleProvider(providerId: ProviderType) {
   }
 }
 
+// Add custom provider
+function addCustomProvider() {
+  if (newProviderForm.value.name && newProviderForm.value.baseUrl) {
+    const newId = modelStore.addCustomProvider(
+      newProviderForm.value.name,
+      newProviderForm.value.baseUrl,
+      newProviderForm.value.apiKey
+    )
+    
+    // Reset form and select the new provider
+    newProviderForm.value = { name: '', baseUrl: '', apiKey: '' }
+    showAddProviderForm.value = false
+    selectProvider(newId)
+  }
+}
+
+// Delete custom provider
+function deleteProvider(providerId: ProviderType) {
+  if (confirm('确定要删除这个自定义提供商吗？')) {
+    modelStore.deleteCustomProvider(providerId)
+    // Select ollama after deletion
+    selectProvider('ollama')
+  }
+}
+
 // Add custom model
 function addModel() {
   if (newModel.value.id && newModel.value.name) {
@@ -112,8 +154,19 @@ async function fetchModels() {
     return
   }
 
-  // Check if required credentials are available
-  if (selectedProviderId.value !== 'ollama' && !provider.apiKey) {
+  // Check if required credentials/URL are available
+  const isCustomProvider = provider.providerType === 'custom'
+  
+  if (isCustomProvider || selectedProviderId.value === 'openrouter') {
+    if (!provider.baseUrl) {
+      fetchError.value = '请先配置 Base URL'
+      return
+    }
+    if (!provider.apiKey) {
+      fetchError.value = '请先配置 API Key'
+      return
+    }
+  } else if (selectedProviderId.value !== 'ollama' && !provider.apiKey) {
     fetchError.value = '请先配置 API Key'
     return
   }
@@ -150,8 +203,19 @@ async function syncModels() {
     return
   }
 
-  // Check if required credentials are available
-  if (selectedProviderId.value !== 'ollama' && !provider.apiKey) {
+  // Check if required credentials/URL are available
+  const isCustomProvider = provider.providerType === 'custom'
+  
+  if (isCustomProvider || selectedProviderId.value === 'openrouter') {
+    if (!provider.baseUrl) {
+      fetchError.value = '请先配置 Base URL'
+      return
+    }
+    if (!provider.apiKey) {
+      fetchError.value = '请先配置 API Key'
+      return
+    }
+  } else if (selectedProviderId.value !== 'ollama' && !provider.apiKey) {
     fetchError.value = '请先配置 API Key'
     return
   }
@@ -229,30 +293,114 @@ async function importDatabase() {
       <!-- Left Sidebar - Provider List -->
       <aside class="w-64 bg-white border-r border-gray-200 overflow-y-auto">
         <div class="p-4">
-          <h2 class="text-sm font-medium text-gray-500 mb-3">模型提供商</h2>
+          <h2 class="text-sm font-medium text-gray-500 mb-3">内置提供商</h2>
           <div class="space-y-1">
             <button
-              v-for="(def, key) in PROVIDER_DEFINITIONS"
-              :key="key"
-              @click="selectProvider(key)"
+              v-for="provider in builtInProviders"
+              :key="provider.id"
+              @click="selectProvider(provider.id)"
               :class="[
                 'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors text-left',
-                selectedProviderId === key 
+                selectedProviderId === provider.id 
                   ? 'bg-blue-50 text-blue-700' 
                   : 'hover:bg-gray-50 text-gray-700'
               ]"
             >
-              <span class="text-xl">{{ def.icon }}</span>
+              <span class="text-xl">{{ provider.icon }}</span>
               <div class="flex-1 min-w-0">
-                <div class="font-medium truncate">{{ def.name }}</div>
-                <div class="text-xs text-gray-500 truncate">{{ def.description }}</div>
+                <div class="font-medium truncate">{{ provider.name }}</div>
+                <div class="text-xs text-gray-500 truncate">{{ provider.description }}</div>
               </div>
               <!-- Enabled indicator -->
               <div 
-                v-if="modelStore.providers[key]?.enabled"
+                v-if="provider.enabled"
                 class="w-2 h-2 bg-green-500 rounded-full"
               ></div>
             </button>
+          </div>
+
+          <!-- Custom Providers Section -->
+          <div class="mt-6">
+            <div class="flex items-center justify-between mb-3">
+              <h2 class="text-sm font-medium text-gray-500">自定义提供商</h2>
+              <button
+                @click="showAddProviderForm = true"
+                class="text-blue-600 hover:text-blue-700"
+                title="添加自定义提供商"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                </svg>
+              </button>
+            </div>
+            
+            <!-- Add Provider Form -->
+            <div v-if="showAddProviderForm" class="mb-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+              <div class="space-y-2">
+                <input
+                  v-model="newProviderForm.name"
+                  type="text"
+                  placeholder="提供商名称"
+                  class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded"
+                />
+                <input
+                  v-model="newProviderForm.baseUrl"
+                  type="text"
+                  placeholder="API 地址"
+                  class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded"
+                />
+                <input
+                  v-model="newProviderForm.apiKey"
+                  type="password"
+                  placeholder="API Key (可选)"
+                  class="w-full px-2 py-1.5 text-sm border border-gray-300 rounded"
+                />
+                <div class="flex gap-2">
+                  <button
+                    @click="addCustomProvider"
+                    :disabled="!newProviderForm.name || !newProviderForm.baseUrl"
+                    class="flex-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                  >
+                    添加
+                  </button>
+                  <button
+                    @click="showAddProviderForm = false; newProviderForm = { name: '', baseUrl: '', apiKey: '' }"
+                    class="flex-1 px-3 py-1.5 text-sm bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="space-y-1">
+              <button
+                v-for="provider in customProviders"
+                :key="provider.id"
+                @click="selectProvider(provider.id)"
+                :class="[
+                  'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors text-left',
+                  selectedProviderId === provider.id 
+                    ? 'bg-blue-50 text-blue-700' 
+                    : 'hover:bg-gray-50 text-gray-700'
+                ]"
+              >
+                <span class="text-xl">{{ provider.icon }}</span>
+                <div class="flex-1 min-w-0">
+                  <div class="font-medium truncate">{{ provider.name }}</div>
+                  <div class="text-xs text-gray-500 truncate">{{ provider.description }}</div>
+                </div>
+                <!-- Enabled indicator -->
+                <div 
+                  v-if="provider.enabled"
+                  class="w-2 h-2 bg-green-500 rounded-full"
+                ></div>
+              </button>
+              
+              <p v-if="customProviders.length === 0 && !showAddProviderForm" class="text-xs text-gray-400 text-center py-4">
+                暂无自定义提供商
+              </p>
+            </div>
           </div>
         </div>
       </aside>
@@ -269,16 +417,28 @@ async function importDatabase() {
                 <p class="text-gray-500">{{ selectedProvider.description }}</p>
               </div>
             </div>
-            <label class="relative inline-flex items-center cursor-pointer">
-              <input 
-                type="checkbox" 
-                :checked="selectedProvider.enabled"
-                @change="toggleProvider(selectedProviderId)"
-                class="sr-only peer"
+            <div class="flex items-center gap-3">
+              <!-- Delete button for custom providers -->
+              <button
+                v-if="selectedProvider.providerType === 'custom'"
+                @click="deleteProvider(selectedProviderId)"
+                class="px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                title="删除此提供商"
               >
-              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-              <span class="ms-3 text-sm font-medium text-gray-700">{{ selectedProvider.enabled ? '已启用' : '未启用' }}</span>
-            </label>
+                删除
+              </button>
+              <!-- Enable/Disable toggle -->
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input 
+                  type="checkbox" 
+                  :checked="selectedProvider.enabled"
+                  @change="toggleProvider(selectedProviderId)"
+                  class="sr-only peer"
+                >
+                <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                <span class="ms-3 text-sm font-medium text-gray-700">{{ selectedProvider.enabled ? '已启用' : '未启用' }}</span>
+              </label>
+            </div>
           </div>
 
           <!-- API Configuration -->
@@ -323,7 +483,9 @@ async function importDatabase() {
                 class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 placeholder="https://api.example.com/v1"
               />
-              <p class="text-xs text-gray-500 mt-1">默认：{{ PROVIDER_DEFINITIONS[selectedProviderId].baseUrl || '未设置' }}</p>
+              <p v-if="selectedProvider.providerType === 'builtin'" class="text-xs text-gray-500 mt-1">
+                默认：{{ PROVIDER_DEFINITIONS[selectedProviderId]?.baseUrl || '未设置' }}
+              </p>
             </div>
           </div>
 
@@ -404,7 +566,7 @@ async function importDatabase() {
                   {{ isFetchingModels ? '获取中...' : '获取模型列表' }}
                 </button>
                 <button 
-                  v-if="selectedProviderId === 'custom' || selectedProviderId === 'ollama'"
+                  v-if="selectedProvider.providerType === 'custom' || selectedProviderId === 'ollama'"
                   @click="showAddModel = true"
                   class="text-sm text-blue-600 hover:text-blue-700 font-medium"
                 >
@@ -503,7 +665,7 @@ async function importDatabase() {
                     {{ (model.contextLength / 1000).toFixed(0) }}K context
                   </span>
                   <button
-                    v-if="selectedProviderId === 'custom' || selectedProviderId === 'ollama'"
+                    v-if="selectedProvider.providerType === 'custom' || selectedProviderId === 'ollama'"
                     @click="removeModel(model.id)"
                     class="text-red-500 hover:text-red-600"
                   >

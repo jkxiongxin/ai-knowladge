@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { Handle, Position } from '@vue-flow/core'
-import { computed, ref, watch, onMounted } from 'vue'
+import { computed, ref, watch, onMounted, inject } from 'vue'
 import { electronApi } from '@/api'
 import SummaryEditor from './SummaryEditor.vue'
 import ContextMenu, { type MenuItem } from './ContextMenu.vue'
 import { useCanvasStore } from '@/stores/canvas'
+import { storeToRefs } from 'pinia'
 
 const props = defineProps<{
   id: string
@@ -19,6 +20,7 @@ const props = defineProps<{
 }>()
 
 const store = useCanvasStore()
+const { isGeneratingChildren } = storeToRefs(store)
 
 // title editing state (single copy)
 
@@ -39,8 +41,38 @@ const statusColor = computed(() => {
   }
 })
 
+// viewport zoom injected from CanvasView; used to hide summary at small zooms
+const viewportZoom = inject('viewportZoom', ref(1)) as any
+const SUMMARY_MIN_ZOOM = 0.6
+const showSummary = computed(() => viewportZoom?.value ? viewportZoom.value >= SUMMARY_MIN_ZOOM : true)
+
 function handleOpenChat() {
   store.openChat(props.id)
+}
+
+// Generate child cards using AI
+const isGeneratingForThis = ref(false)
+const generationError = ref<string | null>(null)
+
+async function handleGenerateChildren(ev?: MouseEvent) {
+  ev?.stopPropagation()
+  if (isGeneratingForThis.value) return
+  
+  isGeneratingForThis.value = true
+  generationError.value = null
+  
+  try {
+    await store.generateChildCards(props.id)
+  } catch (err: any) {
+    console.error('Failed to generate children:', err)
+    generationError.value = err.message || '生成失败'
+    // Clear error after 3 seconds
+    setTimeout(() => {
+      generationError.value = null
+    }, 3000)
+  } finally {
+    isGeneratingForThis.value = false
+  }
 }
 
 const storeContextMode = ref('summary')
@@ -174,6 +206,7 @@ function buildMenuItems() {
   return [
     { id: 'open', label: '打开', icon: 'card' },
     { id: 'edit_summary', label: '编辑摘要', icon: 'note' },
+    { id: 'generate_children', label: 'AI生成子节点', icon: 'sparkles' },
     { id: 'divider-1', label: '-', divider: true },
     { id: 'use_summary', label: '使用摘要' },
     { id: 'use_all', label: '使用全部对话' },
@@ -199,6 +232,9 @@ function onMenuSelect(item: MenuItem) {
       break
     case 'edit_summary':
       startEditSummary()
+      break
+    case 'generate_children':
+      handleGenerateChildren()
       break
     case 'use_summary':
       store.updateNodeContextMode(props.id, 'summary' as any)
@@ -265,6 +301,7 @@ function onMenuSelect(item: MenuItem) {
     >
         <!-- Small inline editor removed. We'll open a larger modal for editing summaries -->
         <SummaryEditor
+          v-if="isEditingSummary || showSummary"
           v-model="isEditingSummary"
           :content="editingSummary"
           :title="props.data.title"
@@ -272,13 +309,30 @@ function onMenuSelect(item: MenuItem) {
           @cancel="cancelEditSummary"
         />
         <div>
-        <p v-if="data.summary" class="line-clamp-4">{{ data.summary }}</p>
-        <p v-else class="italic text-gray-400">双击编辑摘要...</p>
+        <p v-if="data.summary && showSummary" class="line-clamp-4">{{ data.summary }}</p>
+        <p v-else-if="!data.summary && showSummary" class="italic text-gray-400">双击编辑摘要...</p>
       </div>
     </div>
 
     <!-- Footer with chat button -->
-    <div class="flex items-center justify-end pt-2 border-t border-gray-200 border-dashed">
+    <div class="flex items-center justify-between pt-2 border-t border-gray-200 border-dashed">
+      <!-- AI Generate Children Button -->
+      <button
+        @click.stop="handleGenerateChildren"
+        :disabled="isGeneratingForThis"
+        class="flex items-center gap-1 px-2 py-1 text-sm text-gray-500 hover:text-purple-600 hover:bg-purple-50 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        :title="isGeneratingForThis ? '正在生成...' : '用AI生成子节点'"
+      >
+        <svg v-if="!isGeneratingForThis" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+        </svg>
+        <svg v-else class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <span class="hidden group-hover:inline">{{ isGeneratingForThis ? '生成中...' : '扩展' }}</span>
+      </button>
+
       <button
         @click.stop="handleOpenChat"
         class="flex items-center gap-1 px-3 py-1 text-sm text-gray-600 hover:text-ink hover:bg-gray-100 rounded transition-colors"
@@ -289,6 +343,14 @@ function onMenuSelect(item: MenuItem) {
         </svg>
         <span>聊天</span>
       </button>
+    </div>
+
+    <!-- Error tooltip for generation -->
+    <div 
+      v-if="generationError" 
+      class="absolute bottom-12 left-1/2 transform -translate-x-1/2 bg-red-500 text-white text-xs px-3 py-1 rounded shadow-lg z-50 whitespace-nowrap"
+    >
+      {{ generationError }}
     </div>
 
     <!-- Resize handle bottom-right -->

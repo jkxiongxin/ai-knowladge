@@ -1,6 +1,7 @@
 // Model Provider Types and Configurations
 
-export type ProviderType = 'ollama' | 'openai' | 'deepseek' | 'anthropic' | 'cerebras' | 'dashscope' | 'openrouter' | 'custom'
+export type BuiltInProviderType = 'ollama' | 'openai' | 'deepseek' | 'anthropic' | 'cerebras' | 'dashscope' | 'openrouter'
+export type ProviderType = string  // Allow dynamic custom provider IDs like 'custom-1', 'custom-2'
 
 export interface ModelConfig {
   id: string
@@ -23,10 +24,12 @@ export interface ProviderConfig {
   temperature: number
   maxTokens: number
   topP: number
+  // New field to differentiate built-in from custom
+  providerType: 'builtin' | 'custom'
 }
 
-// Built-in provider definitions
-export const PROVIDER_DEFINITIONS: Record<ProviderType, Omit<ProviderConfig, 'apiKey' | 'enabled'>> = {
+// Built-in provider definitions (excludes custom providers which are user-created)
+export const PROVIDER_DEFINITIONS: Record<BuiltInProviderType, Omit<ProviderConfig, 'apiKey' | 'enabled'>> = {
   ollama: {
     id: 'ollama',
     name: 'Ollama',
@@ -43,7 +46,8 @@ export const PROVIDER_DEFINITIONS: Record<ProviderType, Omit<ProviderConfig, 'ap
     ],
     temperature: 0.7,
     maxTokens: 4096,
-    topP: 0.9
+    topP: 0.9,
+    providerType: 'builtin'
   },
   openai: {
     id: 'openai',
@@ -59,7 +63,8 @@ export const PROVIDER_DEFINITIONS: Record<ProviderType, Omit<ProviderConfig, 'ap
     ],
     temperature: 0.7,
     maxTokens: 4096,
-    topP: 1.0
+    topP: 1.0,
+    providerType: 'builtin'
   },
   openrouter: {
     id: 'openrouter',
@@ -73,7 +78,8 @@ export const PROVIDER_DEFINITIONS: Record<ProviderType, Omit<ProviderConfig, 'ap
     ],
     temperature: 0.7,
     maxTokens: 4096,
-    topP: 1.0
+    topP: 1.0,
+    providerType: 'builtin'
   },
   deepseek: {
     id: 'deepseek',
@@ -87,7 +93,8 @@ export const PROVIDER_DEFINITIONS: Record<ProviderType, Omit<ProviderConfig, 'ap
     ],
     temperature: 0.7,
     maxTokens: 4096,
-    topP: 0.9
+    topP: 0.9,
+    providerType: 'builtin'
   },
   anthropic: {
     id: 'anthropic',
@@ -102,7 +109,8 @@ export const PROVIDER_DEFINITIONS: Record<ProviderType, Omit<ProviderConfig, 'ap
     ],
     temperature: 0.7,
     maxTokens: 4096,
-    topP: 0.9
+    topP: 0.9,
+    providerType: 'builtin'
   },
   cerebras: {
     id: 'cerebras',
@@ -116,7 +124,8 @@ export const PROVIDER_DEFINITIONS: Record<ProviderType, Omit<ProviderConfig, 'ap
     ],
     temperature: 0.7,
     maxTokens: 4096,
-    topP: 0.9
+    topP: 0.9,
+    providerType: 'builtin'
   },
   dashscope: {
     id: 'dashscope',
@@ -132,18 +141,8 @@ export const PROVIDER_DEFINITIONS: Record<ProviderType, Omit<ProviderConfig, 'ap
     ],
     temperature: 0.7,
     maxTokens: 4096,
-    topP: 0.9
-  },
-  custom: {
-    id: 'custom',
-    name: '自定义',
-    description: 'OpenAI 兼容 API',
-    icon: '🔧',
-    baseUrl: '',
-    models: [],
-    temperature: 0.7,
-    maxTokens: 4096,
-    topP: 0.9
+    topP: 0.9,
+    providerType: 'builtin'
   }
 }
 
